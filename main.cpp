@@ -5,6 +5,7 @@
 #include <math.h>
 #include <vector>
 #include <fstream>
+#include <cstring>
 
 using namespace cv;
 using namespace std;
@@ -15,7 +16,7 @@ using namespace std;
 #define REPLY_OK 0
 #define REPLY_ERR 1
 #define DISPLAY_RESULT true;
-#define FILE_NAME "..\\img\\%04d.jpg"
+#define DEFAULT_VIDEO_FILE "videos\\stuttgart_00.avi"
 
 // Target class definition
 class Target //Class for the tracking targets
@@ -39,10 +40,11 @@ public:
 // Tracking class definition
 class Tracking //Class for the tracking procedure
 {
-private:
+public:
 	vector<Target> target;	// Tracking targets
-	vector<Target> tempTarget; // Detected targets in current frame
 	VideoCapture m_pVideoCapture;
+private:
+	vector<Target> tempTarget; // Detected targets in current frame
 	VideoWriter* m_pWriterTracking;
 	Mat m_mSrcFrame3;
 	Mat m_mSrcFrame;
@@ -51,7 +53,7 @@ private:
 	int nFrame;
 public:
 	Tracking();
-	~Tracking() ;
+	~Tracking();
 	int DisplayResult(int nTime);
 	int GetFrameNum();
 
@@ -136,11 +138,17 @@ bool Target::sameTarget(Target newTarget)
 Tracking::Tracking()//Class for the tracking targets
 {
 	nFrame = 0;
+	m_pWriterTracking = nullptr;
 }
 
 Tracking::~Tracking()
 {
-
+	if (m_pWriterTracking)
+	{
+		m_pWriterTracking->release();
+		delete m_pWriterTracking;
+		m_pWriterTracking = nullptr;
+	}
 }
 
 int Tracking::DisplayResult(int nTime)
@@ -161,21 +169,46 @@ int Tracking::GetFrameNum()
 
 int Tracking::CreateResultVideo()
 {
-	m_pWriterTracking = new VideoWriter("tracking.wmv", VideoWriter::fourcc('W', 'M', 'V', '1'), 25, Size(m_mSrcFrame3.size().width, m_mSrcFrame3.size().height), 1);
+	// Get video properties
+	double fps = m_pVideoCapture.get(CAP_PROP_FPS);
+	if (fps <= 0) fps = 25; // Default fallback
+	
+	// Use XVID codec which is more widely supported
+	m_pWriterTracking = new VideoWriter("tracking_output.avi", 
+		VideoWriter::fourcc('X', 'V', 'I', 'D'), 
+		fps, 
+		Size(m_mSrcFrame3.size().width, m_mSrcFrame3.size().height), 
+		true);
+
+	if (!m_pWriterTracking->isOpened())
+	{
+		cout << "Warning: Could not create output video file!" << endl;
+	}
+	else
+	{
+		cout << "Output video writer created successfully" << endl;
+	}
 
 	return REPLY_OK;
 }
 
 int Tracking::WriteResultVideo()
 {
-	//IplImage pWrite = IplImage(m_mSrcFrame3);
-	//cvWriteFrame(m_pWriterTracking, &pWrite);   //Write the display image to the output video
+	if (m_pWriterTracking && m_pWriterTracking->isOpened())
+	{
+		m_pWriterTracking->write(m_mSrcFrame3);
+	}
 	return REPLY_OK;
 }
 
 int Tracking::ReleaseResultVideo()
 {
-	//cvReleaseVideoWriter(&m_pWriterTracking);
+	if (m_pWriterTracking)
+	{
+		m_pWriterTracking->release();
+		delete m_pWriterTracking;
+		m_pWriterTracking = nullptr;
+	}
 	return REPLY_OK;
 }
 
@@ -411,12 +444,37 @@ Point findCenter(Mat Image, vector<Point> contour)
 	return center;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+	// Show usage if help is requested
+	if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
+	{
+		cout << "Usage: " << argv[0] << " [video_file_path]" << endl;
+		cout << "Examples:" << endl;
+		cout << "  " << argv[0] << "                              // Use default video" << endl;
+		cout << "  " << argv[0] << " videos\\stuttgart_01.avi     // Use specific video" << endl;
+		cout << "  " << argv[0] << " C:\\path\\to\\your\\video.mp4  // Use full path" << endl;
+		return 0;
+	}
+
 	Tracking testTracking;
 
-	testTracking.LoadSequence(FILE_NAME);
-	while (testTracking.LoadNextFrame() == REPLY_OK && testTracking.GetFrameNum() < 1000)
+	// Use command line argument for video file, or default
+	char* videoFile = (argc > 1) ? argv[1] : (char*)DEFAULT_VIDEO_FILE;
+	cout << "Loading video: " << videoFile << endl;
+
+	if (testTracking.LoadSequence(videoFile) != REPLY_OK)
+	{
+		cout << "Failed to load video file: " << videoFile << endl;
+		cout << "Please check if the file exists and is a valid video format." << endl;
+		cout << "Supported formats: AVI, MP4, MOV, WMV, etc." << endl;
+		return -1;
+	}
+
+	int totalFrames = (int)testTracking.m_pVideoCapture.get(CAP_PROP_FRAME_COUNT);
+	cout << "Total frames in video: " << totalFrames << endl;
+
+	while (testTracking.LoadNextFrame() == REPLY_OK)
 	{
 		if (testTracking.GetFrameNum() == 1)
 		{
@@ -427,9 +485,13 @@ int main()
 		testTracking.TrackTarget();
 		testTracking.DisplayResult(1);
 		testTracking.WriteResultVideo();
+		
+		// Press 'q' to quit early
+		if (waitKey(1) == 'q')
+			break;
 	}
 
-	//testTracking.ReleaseResultVideo();
+	testTracking.ReleaseResultVideo();
 	
 	return 0;
 }
