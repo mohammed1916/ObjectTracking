@@ -51,6 +51,11 @@ private:
 	Mat m_mDiffGaussian;
 	Mat m_mThreshold;
 	int nFrame;
+	
+	// FPS calculation variables
+	double lastTime;
+	double currentTime;
+	double fps;
 public:
 	Tracking();
 	~Tracking();
@@ -139,6 +144,8 @@ Tracking::Tracking()//Class for the tracking targets
 {
 	nFrame = 0;
 	m_pWriterTracking = nullptr;
+	lastTime = (double)getTickCount();
+	fps = 0.0;
 }
 
 Tracking::~Tracking()
@@ -153,7 +160,14 @@ Tracking::~Tracking()
 
 int Tracking::DisplayResult(int nTime)
 {
-	printf("Current frame: %d\n", nFrame);
+	// Calculate FPS
+	currentTime = (double)getTickCount();
+	double timeDiff = (currentTime - lastTime) / getTickFrequency();
+	fps = 1.0 / timeDiff;
+	lastTime = currentTime;
+	
+	// Display frame and FPS information
+	printf("Frame: %d | FPS: %.1f\n", nFrame, fps);
 
 	imshow("Origin Image", m_mSrcFrame3);
 	imshow("otsu threshold", m_mThreshold);
