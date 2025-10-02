@@ -3,6 +3,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/ml/ml.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/objdetect.hpp>
 #ifdef HAVE_OPENCV_CUDAIMGPROC
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
@@ -68,6 +69,11 @@ private:
 	#ifdef HAVE_OPENCV_CUDAIMGPROC
 	cv::cuda::GpuMat gpu_frame, gpu_gray, gpu_gaussian, gpu_diff, gpu_threshold;
 	#endif
+	
+	// Cascade detection variables
+	bool useCascade;
+	CascadeClassifier carCascade;
+	string cascadePath;
 public:
 	Tracking();
 	~Tracking();
@@ -83,8 +89,10 @@ public:
 
 	int ProcessImage();
 	int DetectTarget();
+	int DetectTargetCascade();
 	int TrackTarget();
 	void ForceCPUMode() { useCuda = false; }
+	bool LoadCascade(const string& cascadeFile);
 };
 
 // Function prototype
@@ -193,6 +201,10 @@ Tracking::Tracking()//Class for the tracking targets
 	useCuda = false;
 	cout << "OpenCV compiled without CUDA support." << endl;
 	#endif
+	
+	// Initialize cascade detection
+	useCascade = false;
+	cascadePath = "haarcascade_car.xml"; // Default cascade file
 }
 
 Tracking::~Tracking()
@@ -503,6 +515,55 @@ int Tracking::TrackTarget()
 	return REPLY_OK;
 }
 
+bool Tracking::LoadCascade(const string& cascadeFile)
+{
+	if (!carCascade.load(cascadeFile)) {
+		cout << "Error: Could not load cascade file: " << cascadeFile << endl;
+		cout << "Please ensure the cascade file exists." << endl;
+		cout << "You can download car cascade from: https://github.com/opencv/opencv/tree/master/data/haarcascades" << endl;
+		return false;
+	}
+	cout << "Cascade classifier loaded successfully: " << cascadeFile << endl;
+	useCascade = true;
+	return true;
+}
+
+int Tracking::DetectTargetCascade()
+{
+	vector<Rect> cars;
+	
+	// Detect cars using cascade classifier
+	carCascade.detectMultiScale(m_mSrcFrame, cars, 
+		1.1,        // Scale factor
+		3,          // Min neighbors
+		0,          // Flags
+		Size(30, 30), // Min size
+		Size(300, 300)); // Max size
+	
+	// Convert cascade detections to tempTarget format
+	tempTarget.clear();
+	for (size_t i = 0; i < cars.size(); i++) {
+		// Filter by minimum size
+		if (cars[i].width * cars[i].height > MIN_TARGET_SIZE) {
+			Target newTarget;
+			newTarget.x = cars[i].x;
+			newTarget.y = cars[i].y;
+			newTarget.width = cars[i].width;
+			newTarget.height = cars[i].height;
+			newTarget.LastTrackingFrame = nFrame;
+			tempTarget.push_back(newTarget);
+			
+			// Draw detection rectangle in green for cascade detections
+			rectangle(m_mSrcFrame3, cars[i], Scalar(0, 255, 0), 2);
+			putText(m_mSrcFrame3, "Cascade Detection", 
+				Point(cars[i].x, cars[i].y - 10),
+				FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+		}
+	}
+	
+	return REPLY_OK;
+}
+
 Point findCenter(Mat Image, vector<Point> contour)
 {
 	// Find the center point of the given connected domain'contour'.
@@ -565,20 +626,33 @@ int main(int argc, char* argv[])
 		cout << "  -h, --help     Show this help message" << endl;
 		cout << "  --cpu          Force CPU processing (disable CUDA)" << endl;
 		cout << "  --cuda-info    Show CUDA information and exit" << endl;
+		cout << "  --cascade [file] Use Haar cascade detection (optional .xml cascade file)" << endl;
 		cout << "Examples:" << endl;
 		cout << "  " << argv[0] << "                              // Use default video with auto CUDA detection" << endl;
 		cout << "  " << argv[0] << " videos\\stuttgart_01.avi     // Use specific video" << endl;
 		cout << "  " << argv[0] << " --cpu videos\\test.mp4       // Force CPU processing" << endl;
+		cout << "  " << argv[0] << " --cascade videos\\test.mp4   // Use default cascade detection" << endl;
+		cout << "  " << argv[0] << " --cascade cars.xml videos\\test.mp4 // Use custom cascade file" << endl;
 		cout << "  " << argv[0] << " --cuda-info                 // Show CUDA capabilities" << endl;
 		return 0;
 	}
 
 	// Check for force CPU option and get video file
 	bool forceCPU = false;
+	bool useCascadeDetection = false;
+	string cascadeFile = "haarcascade_car.xml";
 	char* videoFile = nullptr;
+	
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--cpu") == 0) {
 			forceCPU = true;
+		} else if (strcmp(argv[i], "--cascade") == 0) {
+			useCascadeDetection = true;
+			// Check if next argument is a cascade file path (must contain .xml)
+			if (i + 1 < argc && argv[i + 1][0] != '-' && strstr(argv[i + 1], ".xml") != nullptr) {
+				cascadeFile = argv[i + 1];
+				i++; // Skip the cascade file argument
+			}
 		} else if (argv[i][0] != '-') {
 			videoFile = argv[i];
 			break; // Take the first non-option argument as video file
@@ -594,6 +668,15 @@ int main(int argc, char* argv[])
 	if (forceCPU) {
 		cout << "CPU processing forced by --cpu option" << endl;
 		testTracking.ForceCPUMode();
+	}
+	
+	// Load cascade if requested
+	if (useCascadeDetection) {
+		cout << "Loading cascade classifier: " << cascadeFile << endl;
+		if (!testTracking.LoadCascade(cascadeFile)) {
+			cout << "Falling back to background subtraction method." << endl;
+			useCascadeDetection = false;
+		}
 	}
 
 	// Use command line argument for video file, or default
@@ -618,7 +701,14 @@ int main(int argc, char* argv[])
 			testTracking.CreateResultVideo();
 		}
 		testTracking.ProcessImage();
-		testTracking.DetectTarget();
+		
+		// Choose detection method based on command line option
+		if (useCascadeDetection) {
+			testTracking.DetectTargetCascade();
+		} else {
+			testTracking.DetectTarget();
+		}
+		
 		testTracking.TrackTarget();
 		testTracking.DisplayResult(1);
 		testTracking.WriteResultVideo();
