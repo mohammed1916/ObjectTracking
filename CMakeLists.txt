@@ -1,8 +1,11 @@
-cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.5)
 project(ObjectTracking)
+
+set(CMAKE_CXX_STANDARD 17)
 
 add_executable (ObjectTracking main.cpp target.h target.cpp tracking.h tracking.cpp)
 
+set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install/x64/vc17/lib")
 find_package(OpenCV REQUIRED)
 if(OpenCV_FOUND)
   target_include_directories(ObjectTracking PUBLIC
