@@ -3,7 +3,7 @@ project(ObjectTracking)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_executable (ObjectTracking main.cpp target.h target.cpp tracking.h tracking.cpp)
+add_executable (ObjectTracking main.cpp)
 
 set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install/x64/vc17/lib")
 find_package(OpenCV REQUIRED)
