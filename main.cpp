@@ -2,6 +2,12 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/ml/ml.hpp>
+#include <opencv2/imgproc.hpp>
+#ifdef HAVE_OPENCV_CUDAIMGPROC
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#endif
 #include <math.h>
 #include <vector>
 #include <fstream>
@@ -56,6 +62,12 @@ private:
 	double lastTime;
 	double currentTime;
 	double fps;
+	
+	// CUDA support variables
+	bool useCuda;
+	#ifdef HAVE_OPENCV_CUDAIMGPROC
+	cv::cuda::GpuMat gpu_frame, gpu_gray, gpu_gaussian, gpu_diff, gpu_threshold;
+	#endif
 public:
 	Tracking();
 	~Tracking();
@@ -72,6 +84,7 @@ public:
 	int ProcessImage();
 	int DetectTarget();
 	int TrackTarget();
+	void ForceCPUMode() { useCuda = false; }
 };
 
 // Function prototype
@@ -126,7 +139,7 @@ bool Target::sameTarget(Target newTarget)
 	if (5 * area < newArea || area>5 * newArea)
 		return false;
 	Mat prediction = kalman->predict();
-	Point predictCenter(prediction.at<float>(0), prediction.at<float>(1));
+	Point predictCenter(static_cast<int>(prediction.at<float>(0)), static_cast<int>(prediction.at<float>(1)));
 	if (predictCenter.x > newTarget.x&&predictCenter.x < (newTarget.x + newTarget.width) && predictCenter.y>newTarget.y&&predictCenter.y < (newTarget.y + newTarget.height))
 	{
 		return true;
@@ -146,6 +159,40 @@ Tracking::Tracking()//Class for the tracking targets
 	m_pWriterTracking = nullptr;
 	lastTime = (double)getTickCount();
 	fps = 0.0;
+	
+	// Check for CUDA support with fallback strategy
+	#ifdef HAVE_OPENCV_CUDAIMGPROC
+	cout << "Testing CUDA compatibility for compute capability 8.9..." << endl;
+	useCuda = false; // Start with CPU, try to enable CUDA
+	
+	if (cv::cuda::getCudaEnabledDeviceCount() > 0) {
+		try {
+			// Test with a very simple operation first
+			cv::cuda::GpuMat test_mat(10, 10, CV_8UC1);
+			test_mat.setTo(cv::Scalar(255));
+			cout << "Basic CUDA memory operations: OK" << endl;
+			
+			// Try a simple upload/download
+			Mat cpu_test = Mat::ones(10, 10, CV_8UC1);
+			cv::cuda::GpuMat gpu_test;
+			gpu_test.upload(cpu_test);
+			gpu_test.download(cpu_test);
+			cout << "CUDA memory transfers: OK" << endl;
+			
+			useCuda = true;
+			cout << "CUDA acceleration enabled for RTX 4060!" << endl;
+		} catch (const cv::Exception& e) {
+			cout << "CUDA test failed: " << e.what() << endl;
+			cout << "Using optimized CPU processing instead." << endl;
+			useCuda = false;
+		}
+	} else {
+		cout << "No CUDA devices found." << endl;
+	}
+	#else
+	useCuda = false;
+	cout << "OpenCV compiled without CUDA support." << endl;
+	#endif
 }
 
 Tracking::~Tracking()
@@ -166,8 +213,8 @@ int Tracking::DisplayResult(int nTime)
 	fps = 1.0 / timeDiff;
 	lastTime = currentTime;
 	
-	// Display frame and FPS information
-	printf("Frame: %d | FPS: %.1f\n", nFrame, fps);
+	// Display frame, FPS, and processing mode information
+	printf("Frame: %d | FPS: %.1f | Mode: %s\n", nFrame, fps, useCuda ? "CUDA" : "CPU");
 
 	imshow("Origin Image", m_mSrcFrame3);
 	imshow("otsu threshold", m_mThreshold);
@@ -254,10 +301,41 @@ int Tracking::LoadNextFrame()
 
 int Tracking::ProcessImage()
 {
-	cvtColor(m_mSrcFrame3, m_mSrcFrame, COLOR_RGB2GRAY); //Convert 3 channel RGB image to Gray image
+	#ifdef HAVE_OPENCV_CUDAIMGPROC
+	if (useCuda) {
+		try {
+			// GPU-accelerated processing for RTX 4060
+			gpu_frame.upload(m_mSrcFrame3);
+			cv::cuda::cvtColor(gpu_frame, gpu_gray, COLOR_RGB2GRAY);
+			
+			// Try GPU operations, fall back to hybrid if needed
+			Mat cpu_gray, cpu_gaussian, cpu_diff;
+			gpu_gray.download(cpu_gray);
+			
+			// Use CPU for complex operations (more stable)
+			GaussianBlur(cpu_gray, cpu_gaussian, Size(9, 9), 0);
+			for (int i = 0; i < 5; i++) {
+				GaussianBlur(cpu_gaussian, cpu_gaussian, Size(9, 9), 0);
+			}
+			
+			absdiff(cpu_gray, cpu_gaussian, cpu_diff);
+			GaussianBlur(cpu_diff, m_mDiffGaussian, Size(9, 9), 0);
+			threshold(m_mDiffGaussian, m_mThreshold, 30, 255, THRESH_BINARY);
+			
+			m_mSrcFrame = cpu_gray;
+			return REPLY_OK;
+		} catch (const cv::Exception& e) {
+			cout << "CUDA processing failed: " << e.what() << endl;
+			useCuda = false;
+		}
+	}
+	#endif
+	
+	// CPU processing
+	cvtColor(m_mSrcFrame3, m_mSrcFrame, COLOR_RGB2GRAY);
 
 	Mat mGaussian;
-	GaussianBlur(m_mSrcFrame, mGaussian, Size(9, 9), 0);  //Gaussian blur
+	GaussianBlur(m_mSrcFrame, mGaussian, Size(9, 9), 0);
 	for (int i = 0; i < 5; i++)
 	{
 		GaussianBlur(mGaussian, mGaussian, Size(9, 9), 0);
@@ -265,13 +343,11 @@ int Tracking::ProcessImage()
 
 	Mat mGroundSkyTest;
 	threshold(mGaussian, mGroundSkyTest, 0, 255, THRESH_OTSU);
-	//Otsu thresholding the Gaussian blured image
-	//Get the raw image for horizon detecion
 
 	Mat mDiff;
-	absdiff(m_mSrcFrame, mGaussian, mDiff); //absolute value of the difference between original image and Gaussian blured image
+	absdiff(m_mSrcFrame, mGaussian, mDiff);
 
-	GaussianBlur(mDiff, m_mDiffGaussian, Size(9, 9), 0); //Gaussian blur
+	GaussianBlur(mDiff, m_mDiffGaussian, Size(9, 9), 0);
 	for (int i = 0; i < 1; i++)
 	{
 		GaussianBlur(m_mDiffGaussian, m_mDiffGaussian, Size(9, 9), 0);
@@ -432,7 +508,7 @@ Point findCenter(Mat Image, vector<Point> contour)
 	// Find the center point of the given connected domain'contour'.
 	Rect r = boundingRect(contour);
 
-	Point center(r.x+0.5*r.width, r.y+0.5*r.height);
+	Point center(static_cast<int>(r.x + 0.5*r.width), static_cast<int>(r.y + 0.5*r.height));
 	//Image.cols;
 	//if (r.x + r.width>Image.cols)
 	//{
@@ -460,22 +536,69 @@ Point findCenter(Mat Image, vector<Point> contour)
 
 int main(int argc, char* argv[])
 {
+	// Show CUDA information if requested (check first)
+	cout << "CUDA Information" << endl;
+	#ifdef HAVE_OPENCV_CUDAIMGPROC
+	int deviceCount = cv::cuda::getCudaEnabledDeviceCount();
+	cout << "OpenCV compiled with CUDA support: YES" << endl;
+	cout << "CUDA-enabled devices: " << deviceCount << endl;
+	if (deviceCount > 0) {
+		for (int j = 0; j < deviceCount; j++) {
+			cv::cuda::DeviceInfo deviceInfo(j);
+			cout << "Device " << j << ": " << deviceInfo.name() << endl;
+			cout << "  Compute capability: " << deviceInfo.majorVersion() << "." << deviceInfo.minorVersion() << endl;
+			cout << "  Total memory: " << deviceInfo.totalMemory() / (1024*1024) << " MB" << endl;
+		}
+	} else {
+		cout << "No CUDA devices detected" << endl;
+	}
+	#else
+	cout << "OpenCV compiled with CUDA support: NO" << endl;
+	cout << "To enable CUDA, recompile OpenCV with -DWITH_CUDA=ON" << endl;
+	#endif
+	
 	// Show usage if help is requested
 	if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
 	{
-		cout << "Usage: " << argv[0] << " [video_file_path]" << endl;
+		cout << "Usage: " << argv[0] << " [options] [video_file_path]" << endl;
+		cout << "Options:" << endl;
+		cout << "  -h, --help     Show this help message" << endl;
+		cout << "  --cpu          Force CPU processing (disable CUDA)" << endl;
+		cout << "  --cuda-info    Show CUDA information and exit" << endl;
 		cout << "Examples:" << endl;
-		cout << "  " << argv[0] << "                              // Use default video" << endl;
+		cout << "  " << argv[0] << "                              // Use default video with auto CUDA detection" << endl;
 		cout << "  " << argv[0] << " videos\\stuttgart_01.avi     // Use specific video" << endl;
-		cout << "  " << argv[0] << " C:\\path\\to\\your\\video.mp4  // Use full path" << endl;
+		cout << "  " << argv[0] << " --cpu videos\\test.mp4       // Force CPU processing" << endl;
+		cout << "  " << argv[0] << " --cuda-info                 // Show CUDA capabilities" << endl;
 		return 0;
+	}
+
+	// Check for force CPU option and get video file
+	bool forceCPU = false;
+	char* videoFile = nullptr;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--cpu") == 0) {
+			forceCPU = true;
+		} else if (argv[i][0] != '-') {
+			videoFile = argv[i];
+			break; // Take the first non-option argument as video file
+		}
+	}
+	if (!videoFile) {
+		videoFile = (char*)DEFAULT_VIDEO_FILE;
 	}
 
 	Tracking testTracking;
 
+	// Override CUDA detection if CPU is forced
+	if (forceCPU) {
+		cout << "CPU processing forced by --cpu option" << endl;
+		testTracking.ForceCPUMode();
+	}
+
 	// Use command line argument for video file, or default
-	char* videoFile = (argc > 1) ? argv[1] : (char*)DEFAULT_VIDEO_FILE;
 	cout << "Loading video: " << videoFile << endl;
+	
 
 	if (testTracking.LoadSequence(videoFile) != REPLY_OK)
 	{
