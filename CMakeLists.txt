@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 
 add_executable (ObjectTracking main.cpp)
 
-# set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install_rtx4060/x64/vc17/lib")
-set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install/x64/vc17/lib")
+set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install_rtx4060/x64/vc17/lib")
+# set(OpenCV_DIR "C:/Users/abd/d/ai/opencv_build/install/x64/vc17/lib")
 find_package(OpenCV REQUIRED)
 if(OpenCV_FOUND)
   target_include_directories(ObjectTracking PUBLIC
